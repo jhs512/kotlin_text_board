@@ -17,7 +17,12 @@ data class Article(val id: Int, val regDate: String, val updateDate: String, val
 
 class ArticleDao {
     private var articleLastId = 0
-    private val articles: MutableList<Article> = mutableListOf()
+    private val articles: MutableList<Article> by lazy { mutableListOf() }
+
+    @JvmName("getArticles1")
+    fun getArticles(): List<Article> {
+        return articles
+    }
 
     fun addArticle(title: String, body: String): Int {
         val id = ++articleLastId
@@ -26,8 +31,6 @@ class ArticleDao {
 
         return id
     }
-
-    fun getArticles() = articles
 
     fun getArticleById(id: Int): Article? {
         val index = getArticleIndexById(id)
@@ -39,7 +42,7 @@ class ArticleDao {
         return articles[index]
     }
 
-    fun getArticleIndexById(id: Int): Int {
+    private fun getArticleIndexById(id: Int): Int {
         return articles.indexOfFirst { it.id == id }
     }
 
@@ -49,7 +52,7 @@ class ArticleDao {
 
     fun modify(id: Int, title: String, body: String) {
         val newArticle = Article(getArticleById(id)!!, title, body)
-        articles.set(getArticleIndexById(id), newArticle)
+        articles[getArticleIndexById(id)] = newArticle
     }
 }
 
@@ -65,7 +68,7 @@ class ArticleService {
 
     fun makeTestData() {
         for (i in 1..10) {
-            addArticle("제목 ${i}", "내용 ${i}")
+            addArticle("제목 $i", "내용 $i")
         }
     }
 
@@ -91,26 +94,36 @@ object Container {
 }
 
 class UsrArticleController {
-    private val articleService = Container.articleService;
+    private val articleService = Container.articleService
 
     init {
         articleService.makeTestData()
     }
 
-    fun callAction(command: String) {
-        if (command == "article add") {
-            doAdd(command)
-        } else if (command == "article list") {
-            showList(command)
-        } else if (command.startsWith("article delete ")) {
-            doDelete(command)
-        } else if (command.startsWith("article modify ")) {
-            doModify(command)
+    fun callAction(request: Request) {
+        when {
+            request.path.endsWith("article/list") -> {
+                showList(request)
+            }
+            request.path.endsWith("article/add") -> {
+                showAdd(request)
+            }
+            request.path.endsWith("article/doDelete") -> {
+                doDelete(request)
+            }
+            request.path.endsWith("article/modify") -> {
+                showModify(request)
+            }
         }
     }
 
-    private fun doModify(command: String) {
-        val id = command.split(" ").last().toInt()
+    private fun showModify(request: Request) {
+        if (request.getParameter("id").isNullOrBlank()) {
+            println("id를 입력해주세요.")
+            return
+        }
+
+        val id = request.getParameter("id")!!.toInt()
 
         val article = articleService.getArticleById(id)
 
@@ -126,13 +139,39 @@ class UsrArticleController {
         print("새 내용 : ")
         val body = readLine()!!.trim()
 
+        doModify(Request("usr/article/doModify?id=$id&title=$title&body=$body"))
+    }
+
+    private fun doModify(request: Request) {
+        if (request.getParameter("id").isNullOrBlank()) {
+            println("id를 입력해주세요.")
+            return
+        }
+
+        val id = request.getParameter("id")!!.toInt()
+
+        val article = articleService.getArticleById(id)
+
+        if (article == null) {
+            println("${id}번 글은 존재하지 않습니다.")
+            return
+        }
+
+        val title = request.getParameter("title")!!
+        val body = request.getParameter("body")!!
+
         articleService.modify(id, title, body)
 
         println("${id}번 글을 수정하였습니다.")
     }
 
-    private fun doDelete(command: String) {
-        val id = command.split(" ").last().toInt()
+    private fun doDelete(request: Request) {
+        if (request.getParameter("id").isNullOrBlank()) {
+            println("id를 입력해주세요.")
+            return
+        }
+
+        val id = request.getParameter("id")!!.toInt()
 
         val article = articleService.getArticleById(id)
 
@@ -146,7 +185,7 @@ class UsrArticleController {
         println("${id}번 글을 삭제하였습니다.")
     }
 
-    private fun showList(command: String) {
+    private fun showList(request: Request) {
         val header = mutableListOf<String>()
         header.add("번호")
         header.add("제목".padEnd(17, ' '))
@@ -165,11 +204,18 @@ class UsrArticleController {
         }
     }
 
-    private fun doAdd(command: String) {
+    private fun showAdd(request: Request) {
         print("제목 : ")
         val title = readLine()!!.trim()
         print("내용 : ")
         val body = readLine()!!.trim()
+
+        doAdd(Request("usr/article/doAdd?title=$title&body=$body"))
+    }
+
+    private fun doAdd(request: Request) {
+        val title = request.getParameter("title")!!
+        val body = request.getParameter("body")!!
 
         val newId = articleService.addArticle(title, body)
 
@@ -190,15 +236,50 @@ object App {
             if (command.isNullOrEmpty())
                 continue
 
-            if (command.startsWith("article ")) {
-                usrArticleController.callAction(command)
+            val request = Request(command)
+
+            if (request.path.startsWith("usr/article")) {
+                usrArticleController.callAction(request)
             } else if (command == "system exit") {
-                break;
+                break
             }
         }
 
         println("== 텍스트 게시판 끝 ==")
     }
+}
+
+class Request(private val rawCommand: String) {
+    private val rawCommandBits by lazy {
+        val path = rawCommand.substringBefore('?')
+        val queryStr = rawCommand.substringAfter('?')
+
+        arrayOf(path, queryStr)
+    }
+
+    val path by lazy {
+        rawCommandBits[0]
+    }
+
+    private val queryString by lazy {
+        rawCommandBits[1]
+    }
+
+    private val parameters by lazy {
+        val queryStringBits = queryString.split("&")
+        val parameters = mutableMapOf<String, String>()
+
+        for (queryStringBit in queryStringBits) {
+            val name = queryStringBit.substringBefore('=')
+            val value = queryStringBit.substringAfter('=')
+
+            parameters[name] = value
+        }
+
+        parameters
+    }
+
+    fun getParameter(name: String): String? = parameters[name]
 }
 
 object Util {
