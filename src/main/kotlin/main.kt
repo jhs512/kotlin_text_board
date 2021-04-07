@@ -6,6 +6,13 @@ fun main(args: Array<String>) {
 }
 
 data class Article(val id: Int, val regDate: String, val updateDate: String, val title: String, val body: String) {
+    constructor(article: Article, title: String, body: String) : this(
+        article.id,
+        article.regDate,
+        Util.getNowDateStr(),
+        title,
+        body
+    )
 }
 
 class ArticleDao {
@@ -23,11 +30,26 @@ class ArticleDao {
     fun getArticles() = articles
 
     fun getArticleById(id: Int): Article? {
-        return articles.find { it.id == id }
+        val index = getArticleIndexById(id)
+
+        if (index == -1) {
+            return null
+        }
+
+        return articles[index]
+    }
+
+    fun getArticleIndexById(id: Int): Int {
+        return articles.indexOfFirst { it.id == id }
     }
 
     fun deleteById(id: Int) {
-        articles.remove(getArticleById((id)))
+        articles.removeAt(getArticleIndexById(id))
+    }
+
+    fun modify(id: Int, title: String, body: String) {
+        val newArticle = Article(getArticleById(id)!!, title, body)
+        articles.set(getArticleIndexById(id), newArticle)
     }
 }
 
@@ -50,6 +72,8 @@ class ArticleService {
     fun getArticleById(id: Int) = articleDao.getArticleById(id)
 
     fun deleteById(id: Int) = articleDao.deleteById(id)
+
+    fun modify(id: Int, title: String, body: String) = articleDao.modify(id, title, body)
 }
 
 object Container {
@@ -80,7 +104,31 @@ class UsrArticleController {
             showList(command)
         } else if (command.startsWith("article delete ")) {
             doDelete(command)
+        } else if (command.startsWith("article modify ")) {
+            doModify(command)
         }
+    }
+
+    private fun doModify(command: String) {
+        val id = command.split(" ").last().toInt()
+
+        val article = articleService.getArticleById(id)
+
+        if (article == null) {
+            println("${id}번 글은 존재하지 않습니다.")
+            return
+        }
+
+        println("기존 제목 : ${article.title}")
+        print("새 제목 : ")
+        val title = readLine()!!.trim()
+        println("기존 내용 : ${article.body}")
+        print("새 내용 : ")
+        val body = readLine()!!.trim()
+
+        articleService.modify(id, title, body)
+
+        println("${id}번 글을 수정하였습니다.")
     }
 
     private fun doDelete(command: String) {
