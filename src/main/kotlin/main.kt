@@ -1,58 +1,280 @@
+import java.sql.*
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import kotlin.properties.Delegates
+
+class SecSql {
+    private val sqlBuilder by lazy { StringBuilder() }
+
+    private val dataList by lazy { mutableListOf<Any>() }
+
+    private val format: String
+        get() = sqlBuilder.toString().trim { it <= ' ' }
+
+    private val rawSql: String
+        get() {
+            var rawSql = format
+            for (i in dataList.indices) {
+                val data = dataList[i]
+                rawSql = rawSql.replaceFirst("\\?".toRegex(), "'$data'")
+            }
+            return rawSql
+        }
+
+    companion object {
+        fun from(sql: String): SecSql {
+            return SecSql().append(sql)
+        }
+    }
+
+    override fun toString(): String {
+        return "rawSql=$rawSql, data=$dataList"
+    }
+
+    private val isInsert: Boolean
+        get() = format.startsWith("INSERT")
+
+    fun append(vararg args: Any): SecSql {
+        if (args.isNotEmpty()) {
+            val sqlBit = args[0] as String
+            sqlBuilder.append("$sqlBit ")
+        }
+
+        for (i in 1 until args.size) {
+            dataList.add(args[i])
+        }
+        return this
+    }
+
+    fun getPreparedStatement(connection: Connection): PreparedStatement {
+        val stmt = if (isInsert) {
+            connection.prepareStatement(format, Statement.RETURN_GENERATED_KEYS)
+        } else {
+            connection.prepareStatement(format)
+        }
+
+        for (i in dataList.indices) {
+            val data = dataList[i]
+            val parameterIndex = i + 1
+            if (data is Int) {
+                stmt.setInt(parameterIndex, data)
+            } else if (data is String) {
+                stmt.setString(parameterIndex, data)
+            }
+        }
+
+        return stmt
+    }
+}
+
+class MySQLApi(
+    private val dbHost: String,
+    private val dbLoginId: String,
+    private val dbLoginPw: String,
+    private val dbName: String
+) {
+    private var isDevMode by Delegates.notNull<Boolean>()
+
+    init {
+        isDevMode = false
+    }
+
+    private val connections: MutableMap<Long, Connection> by lazy {
+        mutableMapOf()
+    }
+
+    fun closeConnection() {
+        val currentThreadId = Thread.currentThread().id
+        if (!connections.containsKey(currentThreadId)) {
+            return
+        }
+
+        val connection = connections[currentThreadId]
+
+        if (!(connection == null || connection.isClosed)) {
+            connection.close()
+        }
+
+        connections.remove(currentThreadId)
+    }
+
+    private val connection: Connection
+        get() {
+            val currentThreadId = Thread.currentThread().id
+
+            if (!connections.containsKey(currentThreadId)) {
+                Class.forName("com.mysql.cj.jdbc.Driver")
+                val url = ("jdbc:mysql://" + dbHost + "/" + dbName
+                        + "?useUnicode=true&characterEncoding=utf8&autoReconnect=true&serverTimezone=Asia/Seoul&useOldAliasMetadataBehavior=true&zeroDateTimeBehavior=convertToNull&connectTimeout=60")
+                val connection = DriverManager.getConnection(url, dbLoginId, dbLoginPw)
+                connections[currentThreadId] = connection
+            }
+
+            return connections[currentThreadId]!!
+        }
+
+    fun selectRow(sql: SecSql): Map<String, Any> {
+        val rows = selectRows(sql)
+        return if (rows.isEmpty()) {
+            mapOf()
+        } else rows[0]
+    }
+
+    fun selectRows(sql: SecSql): List<Map<String, Any>> {
+        val stmt = sql.getPreparedStatement(connection)
+        val rs = stmt.executeQuery()
+
+        val metaData = rs.metaData
+        val columnSize = metaData.columnCount
+
+        val rows: MutableList<Map<String, Any>> = mutableListOf()
+
+        while (rs.next()) {
+            val row: MutableMap<String, Any> = HashMap()
+
+            for (columnIndex in 0 until columnSize) {
+                val columnName = metaData.getColumnName(columnIndex + 1)
+                when (val value = rs.getObject(columnName)) {
+                    is Long -> {
+                        val numValue = value.toInt()
+                        row[columnName] = numValue
+                    }
+                    is LocalDateTime -> {
+                        row[columnName] = value.toString().replace('T', ' ')
+                    }
+                    is Timestamp -> {
+                        var dateValue = value.toString()
+                        dateValue = dateValue.substring(0, dateValue.length - 2)
+                        row[columnName] = dateValue
+                    }
+                    else -> {
+                        row[columnName] = value
+                    }
+                }
+            }
+            rows.add(row)
+        }
+        return rows
+    }
+
+    fun selectRowIntValue(sql: SecSql): Int {
+        val row = selectRow(sql)
+        for (key in row.keys) {
+            return row[key] as Int
+        }
+        return -1
+    }
+
+    fun selectRowStringValue(sql: SecSql): String? {
+        val row = selectRow(sql)
+        for (key in row.keys) {
+            return row[key] as String?
+        }
+        return ""
+    }
+
+    fun selectRowBooleanValue(sql: SecSql): Boolean {
+        val row = selectRow(sql)
+        for (key in row.keys) {
+            return row[key] as Int == 1
+        }
+        return false
+    }
+
+    // 반환 : 생성된 ID를 반환
+    fun insert(sql: SecSql): Int {
+        val stmt = sql.getPreparedStatement(connection)
+        stmt.executeUpdate()
+        val rs = stmt.generatedKeys
+        if (rs.next()) {
+            return rs.getInt(1)
+        }
+        return -1
+    }
+
+    // 반환 : 수정된 row 개수
+    fun update(sql: SecSql): Int {
+        val stmt = sql.getPreparedStatement(connection)
+        return stmt.executeUpdate()
+    }
+
+    // 반환 : 삭제된 row 개수
+    fun delete(sql: SecSql): Int {
+        return update(sql)
+    }
+}
+
 
 fun main(args: Array<String>) {
     App.run()
 }
 
-data class Article(val id: Int, val regDate: String, val updateDate: String, val title: String, val body: String) {
-    constructor(article: Article, title: String, body: String) : this(
-        article.id,
-        article.regDate,
-        Util.getNowDateStr(),
-        title,
-        body
+data class Article(
+    val id: Int,
+    val regDate: String,
+    val updateDate: String,
+    val title: String,
+    val body: String
+) {
+    constructor(it: Map<String, Any>) : this(
+        it["id"] as Int,
+        it["regDate"] as String,
+        it["updateDate"] as String,
+        it["title"] as String,
+        it["body"] as String
     )
 }
 
 class ArticleDao {
-    private var articleLastId = 0
-    private val articles: MutableList<Article> by lazy { mutableListOf() }
-
-    @JvmName("getArticles1")
     fun getArticles(): List<Article> {
-        return articles
+        return Container.mysqlApi.selectRows(
+            SecSql
+                .from("SELECT * FROM article ORDER BY id DESC")
+        ).map { Article(it) }
     }
 
     fun addArticle(title: String, body: String): Int {
-        val id = ++articleLastId
-        val newArticle = Article(id, Util.getNowDateStr(), Util.getNowDateStr(), title, body)
-        articles.add(newArticle)
-
-        return id
+        return Container.mysqlApi.insert(
+            SecSql
+                .from("INSERT INTO article")
+                .append("SET regDate = NOW()")
+                .append(", updateDate = NOW()")
+                .append(", title = ?", title)
+                .append(", body = ?", body)
+        )
     }
 
     fun getArticleById(id: Int): Article? {
-        val index = getArticleIndexById(id)
+        val map = Container.mysqlApi.selectRow(
+            SecSql
+                .from("SELECT * FROM article")
+                .append("WHERE id = ?", id)
+        )
 
-        if (index == -1) {
+        if (map.isEmpty()) {
             return null
         }
 
-        return articles[index]
-    }
-
-    private fun getArticleIndexById(id: Int): Int {
-        return articles.indexOfFirst { it.id == id }
+        return Article(map)
     }
 
     fun deleteById(id: Int) {
-        articles.removeAt(getArticleIndexById(id))
+        Container.mysqlApi.delete(
+            SecSql
+                .from("DELETE FROM article")
+                .append("WHERE id = ?", id)
+        )
     }
 
     fun modify(id: Int, title: String, body: String) {
-        val newArticle = Article(getArticleById(id)!!, title, body)
-        articles[getArticleIndexById(id)] = newArticle
+        Container.mysqlApi.update(
+            SecSql
+                .from("UPDATE article")
+                .append("SET updateDate = NOW()")
+                .append(", title = ?", title)
+                .append(", `body` = ?", body)
+                .append("WHERE id = ?", id)
+        )
     }
 }
 
@@ -60,17 +282,11 @@ class ArticleService {
     private val articleDao = Container.articleDao
 
 
-    fun addArticle(title: String, body: String) {
-        articleDao.addArticle(title, body)
+    fun addArticle(title: String, body: String): Int {
+        return articleDao.addArticle(title, body)
     }
 
     fun getArticles() = articleDao.getArticles()
-
-    fun makeTestData() {
-        for (i in 1..10) {
-            addArticle("제목 $i", "내용 $i")
-        }
-    }
 
     fun getArticleById(id: Int) = articleDao.getArticleById(id)
 
@@ -91,14 +307,14 @@ object Container {
     val usrArticleController by lazy {
         UsrArticleController()
     }
+
+    val mysqlApi by lazy {
+        MySQLApi(App.DB_HOST, App.DB_ID, App.DB_PW, App.DB_NAME)
+    }
 }
 
 class UsrArticleController {
     private val articleService = Container.articleService
-
-    init {
-        articleService.makeTestData()
-    }
 
     fun callAction(request: Request) {
         when {
@@ -224,6 +440,11 @@ class UsrArticleController {
 }
 
 object App {
+    val DB_HOST = "localhost"
+    val DB_ID = "sbsst"
+    val DB_PW = "sbs123414"
+    val DB_NAME = "kotlin_text_board"
+
     fun run() {
         println("== 텍스트 게시판 시작 ==")
 
@@ -231,16 +452,22 @@ object App {
 
         while (true) {
             print("명령어) ")
-            val command = readLine()!!.trim()
+            val rawCommand = readLine()!!.trim()
 
-            if (command.isNullOrEmpty())
+            if (rawCommand.isEmpty())
                 continue
+
+            val command = if (rawCommand.startsWith('/')) {
+                rawCommand.substring(1)
+            } else {
+                rawCommand
+            }
 
             val request = Request(command)
 
             if (request.path.startsWith("usr/article")) {
                 usrArticleController.callAction(request)
-            } else if (command == "system exit") {
+            } else if (command == "system/exit") {
                 break
             }
         }
@@ -279,7 +506,7 @@ class Request(private val rawCommand: String) {
         parameters
     }
 
-    fun getParameter(name: String): String? = parameters[name]
+    fun getParameter(name: String) = parameters[name]
 }
 
 object Util {
